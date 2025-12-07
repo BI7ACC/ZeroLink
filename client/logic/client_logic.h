@@ -19,11 +19,11 @@ friend_t** get_friends();
 int get_friend_count();
 void db_load_history(const char* chat_id);
 void log_msg(const char *format, ...);
-
-/**
- * @brief 向指定的在线好友请求同步聊天记录。
- * @param friend_pk_hex 好友的公钥十六进制字符串。
- */
 void request_chat_sync(const char* friend_pk_hex);
+
+// --- 新增的设置接口 ---
+const char* get_my_public_key_hex();
+int get_my_p2p_port();
+int get_online_peer_count();
 
 #endif //ZEROLINK_CLIENT_LOGIC_H

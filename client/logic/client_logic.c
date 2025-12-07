@@ -41,6 +41,7 @@ static friend_t* friends[MAX_FRIENDS];
 static int friend_count = 0;
 static unsigned char my_pk[crypto_box_PUBLICKEYBYTES];
 static unsigned char my_sk[crypto_box_SECRETKEYBYTES];
+static char my_pk_hex[PK_HEX_LEN + 1]; // 缓存十六进制公钥
 static char exe_dir[PATH_MAX];
 static peer_t *peers[MAX_PEERS];
 static pthread_mutex_t peers_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -155,10 +156,10 @@ void db_load_history(const char* chat_id) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *sender_pk_hex = (const char*)sqlite3_column_text(stmt, 0);
             const char *content = (const char*)sqlite3_column_text(stmt, 1);
-            char my_pk_hex[PK_HEX_LEN + 1];
-            sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
+            char my_pk_hex_local[PK_HEX_LEN + 1];
+            sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
             char buffer[BUFFER_SIZE];
-            if (strcmp(sender_pk_hex, my_pk_hex) == 0) {
+            if (strcmp(sender_pk_hex, my_pk_hex_local) == 0) {
                 snprintf(buffer, sizeof(buffer), "[我]: %s", content);
             } else {
                 snprintf(buffer, sizeof(buffer), "[%s]: %s", get_friend_name_by_hex(sender_pk_hex), content);
@@ -228,7 +229,7 @@ static void vc_merge(cJSON* local_clock, cJSON* remote_clock) {
     }
 }
 
-// --- 身份与好友管理 (无锁，启动时调用) ---
+// --- 身份与好友管理 ---
 static void init_identity() {
     char path[PATH_MAX];
     get_config_path(IDENTITY_FILE, path, sizeof(path));
@@ -250,10 +251,9 @@ static void init_identity() {
             exit(1);
         }
     }
-    char hex_pk[PK_HEX_LEN + 1];
-    sodium_bin2hex(hex_pk, sizeof(hex_pk), my_pk, sizeof(my_pk));
+    sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
     log_msg("==================================================================");
-    log_msg("您的公钥 (ID): %s", hex_pk);
+    log_msg("您的公钥 (ID): %s", my_pk_hex);
     log_msg("==================================================================");
 }
 
@@ -356,13 +356,13 @@ static int is_friend(const char *pk_hex) {
 
 // --- 消息与网络核心逻辑 ---
 static void generate_message_uid(char* uid_buf, size_t buf_len) {
-    char my_pk_hex[PK_HEX_LEN + 1];
+    char my_pk_hex_local[PK_HEX_LEN + 1];
     unsigned char random_bytes[16];
     char random_hex[33];
-    sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
+    sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
     randombytes_buf(random_bytes, sizeof(random_bytes));
     sodium_bin2hex(random_hex, sizeof(random_hex), random_bytes, sizeof(random_bytes));
-    snprintf(uid_buf, buf_len, "%s-%lld-%s", my_pk_hex, (long long)time(NULL), random_hex);
+    snprintf(uid_buf, buf_len, "%s-%lld-%s", my_pk_hex_local, (long long)time(NULL), random_hex);
 }
 
 static void send_encrypted(int sockfd, const unsigned char* shared_key, const char* json_string) {
@@ -387,15 +387,15 @@ void send_chat_message(const char* recipient_name, const char* message) {
         log_msg("[系统] 错误：未在好友列表中找到名为 '%s' 的好友。", recipient_name);
         return;
     }
-    char my_pk_hex[PK_HEX_LEN+1];
-    sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
+    char my_pk_hex_local[PK_HEX_LEN+1];
+    sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
     char uid[PK_HEX_LEN + 50];
     generate_message_uid(uid, sizeof(uid));
     cJSON* clock = db_get_vector_clock(target_pk_hex);
-    vc_increment(clock, my_pk_hex);
+    vc_increment(clock, my_pk_hex_local);
     char* clock_str = cJSON_PrintUnformatted(clock);
     
-    db_save_message(uid, target_pk_hex, my_pk_hex, message, clock_str);
+    db_save_message(uid, target_pk_hex, my_pk_hex_local, message, clock_str);
     db_save_vector_clock(target_pk_hex, clock);
     
     log_msg("[我 -> %s]: %s", recipient_name, message);
@@ -477,7 +477,7 @@ static void *receive_from_peer(void *arg) {
         }
         cJSON_Delete(received_json);
     }
-    remove_peer(peer->sockfd); // <-- FIX: Resource leak fixed.
+    remove_peer(peer->sockfd);
     return NULL;
 }
 
@@ -600,9 +600,9 @@ static void *server_handler(void *arg) {
                 }
                 if ((strcmp(cmd, "PEER") == 0 || strcmp(cmd, "NEW_PEER") == 0) && strlen(my_ip) > 0) {
                     char my_addr[PK_HEX_LEN + 30], peer_addr[PK_HEX_LEN + 30];
-                    char my_pk_hex[PK_HEX_LEN + 1];
-                    sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
-                    sprintf(my_addr, "%s:%s:%d", my_pk_hex, my_ip, my_p2p_port);
+                    char my_pk_hex_local[PK_HEX_LEN + 1];
+                    sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
+                    sprintf(my_addr, "%s:%s:%d", my_pk_hex_local, my_ip, my_p2p_port);
                     sprintf(peer_addr, "%s:%s:%d", pk_hex, ip, port);
                     if (strcmp(my_addr, peer_addr) < 0) {
                          log_msg("[系统] 发现好友 %s，正在尝试连接...", get_friend_name_by_hex(pk_hex));
@@ -672,9 +672,9 @@ int connect_and_listen(const char* server_ip, int server_port, int p2p_port) {
     }
     log_msg("[系统] 已连接到引导服务器。");
     char registration_msg[PK_HEX_LEN + 20];
-    char my_pk_hex[PK_HEX_LEN + 1];
-    sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
-    sprintf(registration_msg, "%s %d\n", my_pk_hex, my_p2p_port);
+    char my_pk_hex_local[PK_HEX_LEN + 1];
+    sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
+    sprintf(registration_msg, "%s %d\n", my_pk_hex_local, my_p2p_port);
     send(server_sockfd, registration_msg, strlen(registration_msg), 0);
     int *server_sockfd_ptr = malloc(sizeof(int)); *server_sockfd_ptr = server_sockfd;
     pthread_create(&server_tid, NULL, server_handler, server_sockfd_ptr);
@@ -687,22 +687,20 @@ void request_chat_sync(const char* friend_pk_hex) {
     unsigned char target_pk[crypto_box_PUBLICKEYBYTES];
     sodium_hex2bin(target_pk, sizeof(target_pk), friend_pk_hex, strlen(friend_pk_hex), NULL, NULL, NULL);
 
-    peer_t* target_peer = NULL;
     int sockfd = -1;
     unsigned char shared_key[crypto_box_BEFORENMBYTES];
 
     pthread_mutex_lock(&peers_mutex);
     for (int i = 0; i < MAX_PEERS; i++) {
         if (peers[i] && peers[i]->key_exchanged && sodium_compare(peers[i]->pk, target_pk, sizeof(target_pk)) == 0) {
-            target_peer = peers[i];
-            sockfd = target_peer->sockfd;
-            memcpy(shared_key, target_peer->shared_key, sizeof(shared_key));
+            sockfd = peers[i]->sockfd;
+            memcpy(shared_key, peers[i]->shared_key, sizeof(shared_key));
             break; 
         }
     }
     pthread_mutex_unlock(&peers_mutex);
 
-    if (target_peer) {
+    if (sockfd != -1) {
         cJSON* local_clock = db_get_vector_clock(friend_pk_hex);
         char* local_clock_str = cJSON_PrintUnformatted(local_clock);
         cJSON *json = cJSON_CreateObject();
@@ -792,9 +790,9 @@ static void handle_sync_response(cJSON *json) {
         cJSON *vc_str_item = cJSON_GetObjectItem(msg_item, "vector_clock");
 
         if (cJSON_IsString(uid) && cJSON_IsString(sender_pk) && cJSON_IsString(content) && cJSON_IsString(vc_str_item)) {
-            char my_pk_hex[PK_HEX_LEN+1];
-            sodium_bin2hex(my_pk_hex, sizeof(my_pk_hex), my_pk, sizeof(my_pk));
-            const char* chat_id = strcmp(sender_pk->valuestring, my_pk_hex) == 0 ? chat_target_pk_hex : sender_pk->valuestring;
+            char my_pk_hex_local[PK_HEX_LEN+1];
+            sodium_bin2hex(my_pk_hex_local, sizeof(my_pk_hex_local), my_pk, sizeof(my_pk));
+            const char* chat_id = strcmp(sender_pk->valuestring, my_pk_hex_local) == 0 ? chat_target_pk_hex : sender_pk->valuestring;
             db_save_message(uid->valuestring, chat_id, sender_pk->valuestring, content->valuestring, vc_str_item->valuestring);
             cJSON* remote_clock = cJSON_Parse(vc_str_item->valuestring);
             if (remote_clock) {
@@ -809,9 +807,26 @@ static void handle_sync_response(cJSON *json) {
     }
     if (new_messages > 0) {
         log_msg("[同步] 收到 %d 条历史消息。", new_messages);
-        if (current_ui_state == UI_STATE_CHATTING) {
-            // This is safe because log_msg is queued and processed by the main thread.
-            // We can add a special "refresh" message to the queue if needed.
+    }
+}
+
+// --- 新增的设置接口实现 ---
+const char* get_my_public_key_hex() {
+    return my_pk_hex;
+}
+
+int get_my_p2p_port() {
+    return my_p2p_port;
+}
+
+int get_online_peer_count() {
+    int count = 0;
+    pthread_mutex_lock(&peers_mutex);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (peers[i]) {
+            count++;
         }
     }
+    pthread_mutex_unlock(&peers_mutex);
+    return count;
 }
